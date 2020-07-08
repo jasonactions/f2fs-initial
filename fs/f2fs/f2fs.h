@@ -79,6 +79,7 @@ struct dir_inode_entry {
 struct fsync_inode_entry {
 	struct list_head list;	/* list head */
 	struct inode *inode;	/* vfs inode pointer */
+	/*标记了fsync的dnode/inode的block地址*/
 	block_t blkaddr;	/* block address locating the last inode */
 };
 
@@ -207,7 +208,14 @@ struct dnode_of_data {
 	bool inode_page_locked;		/* inode page is locked or not */
 	block_t	data_blkaddr;		/* block address of the node block */
 };
-
+/*
+ * @dn: direct node data
+ * @inode: dnode所属的inode
+ * @ipage: inode对应的page
+ * @npage: direct node对应的page
+ * @nid: dnode的node id
+ *
+ */
 static inline void set_new_dnode(struct dnode_of_data *dn, struct inode *inode,
 		struct page *ipage, struct page *npage, nid_t nid)
 {
@@ -249,12 +257,13 @@ struct f2fs_sm_info {
 	struct sit_info *sit_info;		/* whole segment information */
 	struct free_segmap_info *free_info;	/* free segment information */
 	struct dirty_seglist_info *dirty_info;	/* dirty segment information */
+	/* 主要包含6个有效segment */
 	struct curseg_info *curseg_array;	/* active segment information */
 
 	struct list_head wblist_head;	/* list of under-writeback pages */
 	spinlock_t wblist_lock;		/* lock for checkpoint */
 
-	block_t seg0_blkaddr;		/* block address of 0'th segment */
+	block_t seg0_blkaddr;		/* block address of 0'th segment, 默认为cp的block0地址0x200 */
 	block_t main_blkaddr;		/* start block address of main area */
 	block_t ssa_blkaddr;		/* start block address of SSA area */
 
@@ -354,6 +363,7 @@ struct f2fs_sb_info {
 	int por_doing;				/* recovery is doing or not */
 
 	/* for orphan inode management */
+	/*孤儿文件节点，即由于系统奔溃或者断电等异常产生的无法找到上级目录的文件节点`*/
 	struct list_head orphan_inode_list;	/* orphan inode list */
 	struct mutex orphan_inode_mutex;	/* for orphan inode list */
 	unsigned int n_orphans;			/* # of orphan inodes */
@@ -380,6 +390,7 @@ struct f2fs_sb_info {
 	unsigned int total_valid_inode_count;	/* valid inode count */
 	int active_logs;			/* # of active logs */
 
+	/* 如下主要统计main area的block数目 */
 	block_t user_block_count;		/* # of user blocks */
 	block_t total_valid_block_count;	/* # of valid blocks */
 	block_t alloc_valid_block_count;	/* # of allocated blocks */
@@ -398,6 +409,7 @@ struct f2fs_sb_info {
 	 * one is for the LFS mode, and the other is for the SSR mode.
 	 */
 	struct f2fs_stat_info *stat_info;	/* FS status information */
+	/* 统计一共有多少个segment(sb区域除外) */
 	unsigned int segment_count[2];		/* # of allocated segments */
 	unsigned int block_count[2];		/* # of allocated blocks */
 	unsigned int last_victim[2];		/* last victim segment # */
@@ -581,7 +593,10 @@ static inline void *__bitmap_ptr(struct f2fs_sb_info *sbi, int flag)
 	int offset = (flag == NAT_BITMAP) ? ckpt->sit_ver_bitmap_bytesize : 0;
 	return &ckpt->sit_nat_version_bitmap + offset;
 }
-
+/**
+ * 获取cp area的起始block地址
+ * 如果是cp2则需要偏移blocks_per_seg个block
+ */
 static inline block_t __start_cp_addr(struct f2fs_sb_info *sbi)
 {
 	block_t start_addr;
@@ -688,7 +703,7 @@ static inline unsigned int valid_inode_count(struct f2fs_sb_info *sbi)
 	spin_unlock(&sbi->stat_lock);
 	return ret;
 }
-
+/* 释放一个page */
 static inline void f2fs_put_page(struct page *page, int unlock)
 {
 	if (!page || IS_ERR(page))
@@ -729,7 +744,7 @@ static inline __le32 *blkaddr_in_node(struct f2fs_node *node)
 {
 	return RAW_IS_INODE(node) ? node->i.i_addr : node->dn.addr;
 }
-
+/* 通过node page找到偏移为offset的块号  */
 static inline block_t datablock_addr(struct page *node_page,
 		unsigned int offset)
 {
@@ -739,7 +754,10 @@ static inline block_t datablock_addr(struct page *node_page,
 	addr_array = blkaddr_in_node(raw_node);
 	return le32_to_cpu(addr_array[offset]);
 }
-
+/* 
+ * 检查addr数组的第nr个bit是否置位（每个数组元素8bit）
+ * 如nr=12, 则检查addr[1]的第3个bit是否置位
+ */
 static inline int f2fs_test_bit(unsigned int nr, char *addr)
 {
 	int mask;

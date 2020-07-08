@@ -12,7 +12,14 @@
 #define NULL_SEGNO			((unsigned int)(~0))
 
 /* V: Logical segment # in volume, R: Relative segment # in main area */
+/*
+ * Logical segment no:表示以sb区域所在的首个segment(0x0)为起始segment
+ * Relate segment no:表示以main区域的首个segment作为起始segment
+ * free_i->start_segno表示main区域首个segment的Logical segmentno
+ */
+/*将Logical segno转换为Relative segno, 此处segno为Logical seg no(以sb所在segment为首个seg no)*/
 #define GET_L2R_SEGNO(free_i, segno)	(segno - free_i->start_segno)
+/*将Relative segno转换为Logical segno, 此处segno为Relative seg no(以main所在segment为首个seg no)*/
 #define GET_R2L_SEGNO(free_i, segno)	(segno + free_i->start_segno)
 
 #define IS_DATASEG(t)							\
@@ -44,23 +51,28 @@
 	  sbi->segs_per_sec) ||	\
 	 (secno == CURSEG_I(sbi, CURSEG_COLD_NODE)->segno /		\
 	  sbi->segs_per_sec))	\
-
+/*获取segno的首个block的Logical block no*/
 #define START_BLOCK(sbi, segno)						\
 	(SM_I(sbi)->seg0_blkaddr +					\
 	 (GET_R2L_SEGNO(FREE_I(sbi), segno) << sbi->log_blocks_per_seg))
+/*获取curget的下一个将要写入的block的Logcical block no*/
 #define NEXT_FREE_BLKADDR(sbi, curseg)					\
 	(START_BLOCK(sbi, curseg->segno) + curseg->next_blkoff)
 
 #define MAIN_BASE_BLOCK(sbi)	(SM_I(sbi)->main_blkaddr)
 
+/* 将blk_addr转换为以cp区域的第0个block地址为起始地址 */
 #define GET_SEGOFF_FROM_SEG0(sbi, blk_addr)				\
 	((blk_addr) - SM_I(sbi)->seg0_blkaddr)
+/* 以cp区域blk0为起始地址(cp所在seg为起始seg)，计算blk_addr所处的segment*/
 #define GET_SEGNO_FROM_SEG0(sbi, blk_addr)				\
 	(GET_SEGOFF_FROM_SEG0(sbi, blk_addr) >> sbi->log_blocks_per_seg)
+/* 以main区域blk0为起始地址(main所在seg为起始seg)，计算blk_addr所处的segment */
 #define GET_SEGNO(sbi, blk_addr)					\
 	(((blk_addr == NULL_ADDR) || (blk_addr == NEW_ADDR)) ?		\
 	NULL_SEGNO : GET_L2R_SEGNO(FREE_I(sbi),			\
 		GET_SEGNO_FROM_SEG0(sbi, blk_addr)))
+
 #define GET_SECNO(sbi, segno)					\
 	((segno) / sbi->segs_per_sec)
 #define GET_ZONENO_FROM_SEGNO(sbi, segno)				\
@@ -71,11 +83,13 @@
 
 #define GET_SUM_TYPE(footer) ((footer)->entry_type)
 #define SET_SUM_TYPE(footer, type) ((footer)->entry_type = type)
-
+/* segno对应的seg entry在其seg entry block的偏移  */
 #define SIT_ENTRY_OFFSET(sit_i, segno)					\
 	(segno % sit_i->sents_per_block)
+/* 根据segno获取sit entry 所在sit entry block号 */
 #define SIT_BLOCK_OFFSET(sit_i, segno)					\
 	(segno / SIT_ENTRY_PER_BLOCK)
+/* 根据segno找到所处sit entry block的起始sit entry的索引号 */
 #define	START_SEGNO(sit_i, segno)		\
 	(SIT_BLOCK_OFFSET(sit_i, segno) * SIT_ENTRY_PER_BLOCK)
 #define f2fs_bitmap_size(nr)			\
@@ -133,9 +147,13 @@ struct victim_sel_policy {
 	int alloc_mode;			/* LFS or SSR */
 	int gc_mode;			/* GC_CB or GC_GREEDY */
 	unsigned long *dirty_segmap;	/* dirty segment bitmap */
+	/*遍历过程中当前的查找偏移*/
 	unsigned int offset;		/* last scanned bitmap offset */
+	/*表示在查找过程中每次查找跨越的单元，SSR是以1个segment为单元，LFS是以1个section为单元*/
 	unsigned int ofs_unit;		/* bitmap search unit */
+	/*记录查找过程中的最小cost*/
 	unsigned int min_cost;		/* minimum cost */
+	/*记录的是查找过程中最小cost所对应的segno*/
 	unsigned int min_segno;		/* segment # having min. cost */
 };
 
@@ -149,6 +167,7 @@ struct seg_entry {
 	unsigned short ckpt_valid_blocks;
 	unsigned char *ckpt_valid_map;
 	unsigned char type;		/* segment type like CURSEG_XXX_TYPE */
+	/* segment最近一次的修改时间 */
 	unsigned long long mtime;	/* modification time of the segment */
 };
 
@@ -162,9 +181,11 @@ struct segment_allocation {
 
 struct sit_info {
 	const struct segment_allocation *s_ops;
-
+	/* SIT area的起始块地址 */
 	block_t sit_base_addr;		/* start block address of SIT area */
+	/* sit area的block块数 */
 	block_t sit_blocks;		/* # of blocks used by SIT area */
+	/* main area的有效的block块数 */
 	block_t written_valid_blocks;	/* # of valid blocks in main area */
 	char *sit_bitmap;		/* SIT bitmap pointer */
 	unsigned int bitmap_size;	/* SIT bitmap size */
@@ -173,6 +194,7 @@ struct sit_info {
 	unsigned int dirty_sentries;		/* # of dirty sentries */
 	unsigned int sents_per_block;		/* # of SIT entries per block */
 	struct mutex sentry_lock;		/* to protect SIT cache */
+	/*指向为main area分配的seg_entry区域*/
 	struct seg_entry *sentries;		/* SIT segment-level cache */
 	struct sec_entry *sec_entries;		/* SIT section-level cache */
 
@@ -184,10 +206,12 @@ struct sit_info {
 };
 
 struct free_segmap_info {
+	/*以cp区域的seg no(0x1)作为起始seg no,main区域的第一个segment*/
 	unsigned int start_segno;	/* start segment number logically */
 	unsigned int free_segments;	/* # of free segments */
 	unsigned int free_sections;	/* # of free sections */
 	rwlock_t segmap_lock;		/* free segmap lock */
+	/* bit置1表示此segment dirty, bit清0表示此segment clean  */
 	unsigned long *free_segmap;	/* free segment bitmap */
 	unsigned long *free_secmap;	/* free section bitmap */
 };
@@ -210,6 +234,7 @@ struct dirty_seglist_info {
 	unsigned long *dirty_segmap[NR_DIRTY_TYPE];
 	struct mutex seglist_lock;		/* lock for segment bitmaps */
 	int nr_dirty[NR_DIRTY_TYPE];		/* # of dirty segments */
+	/* 由于gc以section为单位，此处置位gc选取的section的所有segment */
 	unsigned long *victim_segmap[2];	/* BG_GC, FG_GC */
 };
 
@@ -222,11 +247,15 @@ struct victim_selection {
 /* for active log information */
 struct curseg_info {
 	struct mutex curseg_mutex;		/* lock for consistency */
+	/* 每个有效的segment有对应一个summary block，它描述了当前segment的blocks状态 */
 	struct f2fs_summary_block *sum_blk;	/* cached summary block */
 	unsigned char alloc_type;		/* current allocation type */
+	/* 当前有效的segment number */
 	unsigned int segno;			/* current segment number */
+	/* 当前有效的segment的下一个将要写入的block在current segment的偏移地址 */
 	unsigned short next_blkoff;		/* next block offset to write */
 	unsigned int zone;			/* current zone number */
+	/* 将要写入的下一个segment number */
 	unsigned int next_segno;		/* preallocated segment */
 };
 
@@ -297,7 +326,7 @@ static inline unsigned int find_next_inuse(struct free_segmap_info *free_i,
 	read_unlock(&free_i->segmap_lock);
 	return ret;
 }
-
+/* 清零segment bitmap/section bit map表示空闲的segment/section */
 static inline void __set_free(struct f2fs_sb_info *sbi, unsigned int segno)
 {
 	struct free_segmap_info *free_i = FREE_I(sbi);
@@ -308,7 +337,17 @@ static inline void __set_free(struct f2fs_sb_info *sbi, unsigned int segno)
 	write_lock(&free_i->segmap_lock);
 	clear_bit(segno, free_i->free_segmap);
 	free_i->free_segments++;
-
+	
+	/* 如果next>=start_segno+sbi->segs_per_sec条件满足，
+	 * 表示当前segment所在的section也是空闲的,对section bitmap清0
+	 * 假设segno=1,secno=0,next=3,start_segno=0,因此3>=0+2
+	 *
+	 * |seg0|seg1|seg2|seg3|seg4|seg5|seg6|seg7|
+	 * +----+----+----+----+----+----+----+----+
+	 * |    | 1  |    | 1  |    |    |    |    | 
+	 * +----+----+----+----+----+----+----+----+
+	 * |  sec0   |  sec1   |  sec2   |  sec3   |
+	 */
 	next = find_next_bit(free_i->free_segmap, TOTAL_SEGS(sbi), start_segno);
 	if (next >= start_segno + sbi->segs_per_sec) {
 		clear_bit(secno, free_i->free_secmap);
@@ -337,6 +376,7 @@ static inline void __set_test_and_free(struct f2fs_sb_info *sbi,
 	unsigned int next;
 
 	write_lock(&free_i->segmap_lock);
+	/* free_i->free_segmap清零表示segment free */
 	if (test_and_clear_bit(segno, free_i->free_segmap)) {
 		free_i->free_segments++;
 
@@ -349,7 +389,7 @@ static inline void __set_test_and_free(struct f2fs_sb_info *sbi,
 	}
 	write_unlock(&free_i->segmap_lock);
 }
-
+/* 置位segno/secno对应的free_segmap/free_secmap，表示segment/section非空闲 */
 static inline void __set_test_and_inuse(struct f2fs_sb_info *sbi,
 		unsigned int segno)
 {
@@ -526,6 +566,7 @@ static inline void verify_block_addr(struct f2fs_sb_info *sbi, block_t blk_addr)
 /*
  * Summary block is always treated as invalid block
  */
+/* 检查raw_sit所描述的valid blocks */
 static inline void check_block_count(struct f2fs_sb_info *sbi,
 		int segno, struct f2fs_sit_entry *raw_sit)
 {
@@ -551,7 +592,9 @@ static inline pgoff_t current_sit_addr(struct f2fs_sb_info *sbi,
 						unsigned int start)
 {
 	struct sit_info *sit_i = SIT_I(sbi);
+	/*获取segno为start的sit entry所在的sit entry block地址*/
 	unsigned int offset = SIT_BLOCK_OFFSET(sit_i, start);
+	/*获取sit entry block的logical block地址*/
 	block_t blk_addr = sit_i->sit_base_addr + offset;
 
 	check_seg_range(sbi, start);
@@ -563,6 +606,27 @@ static inline pgoff_t current_sit_addr(struct f2fs_sb_info *sbi,
 	return blk_addr;
 }
 
+/*
+ * 获取sit entry所在block_addr的下一个block地址,由于sit area如下图排列，因此下个block地址循环在两个sit area区域存放
+ * +---o sit_base_addr
+ * |
+ * |<------------------sit area------------------------------->|<------------------backup sit area------------------------>|                                                        
+ * +-----------------------------------------------------------+-----------------------------------------------------------+                                                       
+ * |  0  |  1  |  2  |  3  |  4  |  5  | ... | SEG |  N-1|  N  |  0  |  1  |  2  |  3  |  4  |  5  | ... | SEG |  N-1|  N  |                                                          * +-----------------------------------------------------------+-----------------------------------------------------------+                                                          *                                   .        .
+ *                         .                          .
+ *                 .                                          .                                                                                                                      
+ *                 +-------------------------------------------+                                                         
+ *                 | 0 | 1 | 2 | 3 | block |...|...|...|510|511|                                                                                                                     
+ *                 +-------------------------------------------+                                                                                                                     
+ *                                .         .
+ *                              .             .                                                                                                                                      
+ *                            .                 .                                                                                                                                    
+ *                          .                     .
+ *                         +-----------------------+                                                                                                                                 
+ *                         | se | se | se |...| se |                                                                                                                                 
+ *                         +-----------------------+                                                                                                                                 
+ *      
+ */
 static inline pgoff_t next_sit_addr(struct f2fs_sb_info *sbi,
 						pgoff_t block_addr)
 {
@@ -600,13 +664,35 @@ static inline void set_summary(struct f2fs_summary *sum, nid_t nid,
 	sum->ofs_in_node = cpu_to_le16(ofs_in_node);
 	sum->version = version;
 }
-
+/**
+ * 获取cp area真正数据开始存放的block地址
+ */
 static inline block_t start_sum_block(struct f2fs_sb_info *sbi)
 {
 	return __start_cp_addr(sbi) +
 		le32_to_cpu(F2FS_CKPT(sbi)->cp_pack_start_sum);
 }
-
+/* 
+ * 在cp区域存放了当前有效segment的summary block
+ * 以128M镜像为例，cp_pack_total_block_count为8：
+ * cp第0个block放空,第1个block存放cp pack数据，第2到第7个block存放当前有效segment的summary block
+ * cp区域的布局如下：
+ *            +---------------------------------------------------------------------------------------------------+
+ *            | f2fs_checkpoint | data summaries | hot node summaries | warm node summaries | cold node summaries |
+ *            +---------------------------------------------------------------------------------------------------+
+ *                             .                 .             
+ *                      .                                   .               
+ *                .                 compacted summaries                 .        
+ *                +----------------+-------------------+----------------+
+ *                |  nat journal   |    sit journal    | data summaries |
+ *                +----------------+-------------------+----------------+
+ *
+ *                .                  normal summaries                   .        
+ *                +----------------+-------------------+----------------+
+ *                |                    data summaries                   |
+ *                +----------------+-------------------+----------------+
+ *
+ */
 static inline block_t sum_blk_addr(struct f2fs_sb_info *sbi, int base, int type)
 {
 	return __start_cp_addr(sbi) +

@@ -41,13 +41,13 @@ static void clear_node_page_dirty(struct page *page)
 	}
 	ClearPageUptodate(page);
 }
-
+/*获取nid对应的nat entry所在的nat entry block*/
 static struct page *get_current_nat_page(struct f2fs_sb_info *sbi, nid_t nid)
 {
 	pgoff_t index = current_nat_addr(sbi, nid);
 	return get_meta_page(sbi, index);
 }
-
+/*此函数是如何选择下一个nat block的？*/
 static struct page *get_next_nat_page(struct f2fs_sb_info *sbi, nid_t nid)
 {
 	struct page *src_page;
@@ -58,7 +58,9 @@ static struct page *get_next_nat_page(struct f2fs_sb_info *sbi, nid_t nid)
 	void *dst_addr;
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 
+	/*获取nid对应的nat entry所在磁盘的block地址*/
 	src_off = current_nat_addr(sbi, nid);
+	/*获取nat entry block地址为src_off的下一个nat entry block的地址*/
 	dst_off = next_nat_addr(sbi, src_off);
 
 	/* get current nat block page with lock */
@@ -95,6 +97,7 @@ static void ra_nat_pages(struct f2fs_sb_info *sbi, int nid)
 	for (i = 0; i < FREE_NID_PAGES; i++, nid += NAT_ENTRY_PER_BLOCK) {
 		if (nid >= nm_i->max_nid)
 			nid = 0;
+		/* 获取nid对应的nat entry所在的block地址  */
 		index = current_nat_addr(sbi, nid);
 
 		page = grab_cache_page(mapping, index);
@@ -254,6 +257,7 @@ static int try_to_free_nats(struct f2fs_sb_info *sbi, int nr_shrink)
 /**
  * This function returns always success
  */
+/*获取nid对应的node info*/
 void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
@@ -269,6 +273,7 @@ void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni)
 	ni->nid = nid;
 
 	/* Check nat cache */
+	/*首先，从nat cache中查找是否有nid对应的f2fs nat enry,如果找到则初始化ni返回*/
 	read_lock(&nm_i->nat_tree_lock);
 	e = __lookup_nat_cache(nm_i, nid);
 	if (e) {
@@ -282,9 +287,12 @@ void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni)
 
 	/* Check current segment summary */
 	mutex_lock(&curseg->curseg_mutex);
+	/*其次，根据nid查询current segment的nat journey，获取f2fs nat entry, 如果找到则初始化ni返回*/
 	i = lookup_journal_in_cursum(sum, NAT_JOURNAL, nid, 0);
 	if (i >= 0) {
+		/*获取索引对应的f2fs nat entry*/
 		ne = nat_in_journal(sum, i);
+		/*用获取的f2fs nat entry初始化node info*/
 		node_info_from_raw_nat(ni, &ne);
 	}
 	mutex_unlock(&curseg->curseg_mutex);
@@ -292,6 +300,7 @@ void get_node_info(struct f2fs_sb_info *sbi, nid_t nid, struct node_info *ni)
 		goto cache;
 
 	/* Fill node_info from nat page */
+	/*再次，如果从current segment的summary中无法查找到nat entry，则从f2fs nat entry block中查找,如果找到则初始化ni返回*/
 	page = get_current_nat_page(sbi, start_nid);
 	nat_blk = (struct f2fs_nat_block *)page_address(page);
 	ne = nat_blk->entries[nid - start_nid];
@@ -306,6 +315,16 @@ cache:
  * The maximum depth is four.
  * Offset[0] will have raw inode offset.
  */
+/*
+ * @block ：data block地址所在dnode page中的索引
+ * @offset：保存了data block的各级索引,假设一个data block有四级索引则：
+ *	　　offset[0]保存data block地址在inode中的索引
+ * 	    offset[1]保存data block地址在dindnode中的索引
+ *          offset[2]保存data block地址在indnode中的索引
+ *          offset[3]保存data block地址在dnode中的索引
+ * @noffset: 一共有多少个索引(index) block(在当前检索到的结点处)
+ * @return: 返回block偏移地址所处的level,如在inode为0，在direct block为1，indirect block为2，dindirect block为3
+ */
 static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 {
 	const long direct_index = ADDRS_PER_INODE;
@@ -317,12 +336,34 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 	int level = 0;
 
 	noffset[0] = 0;
-
+	/*
+	 * 从inode block开始检索, inode中共有direct_index个地址
+	 *
+	 * 如果block < direct_index，说明此地址存在于inode本身
+	 *
+	 * offset[0]=block: 在第0层（inode）中的索引为block
+	 * noffset[0]=0   ：在第0层（inode）中index block的个数为0
+	 *	 
+	 * level=0        : 在inode包含此地址，则level = 0
+	 */	
 	if (block < direct_index) {
 		offset[n++] = block;
 		level = 0;
 		goto got;
 	}
+	/*
+    	 * 如果direct_index < block < direct_blks, 说明此地址存在于第一个direct block中。
+    	 
+	 * offset[0] = NODE_DIR1_BLOCKs, 在第0层（inode）中的索引为NODE_DIR1_BLOCKs
+	 * noffset[0] = 0, 在第0层（inode）中index block的个数为0
+	 *    
+	 * offset[1] = block, 在第1层（1st dnode）中的索引为block
+	 * noffset[1] = 1, 在第1层（1st dnode）中index block的个数为1:inode
+	 *
+	 * level = 1，在1st dnode包含此地址，则level = 1
+	 * 
+	 * note:其实此block已经为原block - direct_index后剩下的值 即其在第一层index block中的索引
+         */
 	block -= direct_index;
 	if (block < direct_blks) {
 		offset[n++] = NODE_DIR1_BLOCK;
@@ -331,6 +372,19 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 		level = 1;
 		goto got;
 	}
+	
+	/*
+	 * 如果 direct_bllks < block < 2 * direct_blks, 说明inode 中不包含此地址，第一个direct block也不包含此
+	 * 地址，而第二个direct index block中包含此地址。
+	 *	 
+	 * offset[0] = NODE_DIR2_BLOCK, 在第0层（inode）中的索引为NODE_DIR2_BLOCKs
+	 * noffset[0] = 0, 在第0层（inode）中index block的个数为0
+	 *
+	 * offset[1] = block，第1层（2nd dnode）中的索引为block
+	 * noffset[1] = 2, 在第1层（2nd dnode）中index block的个数为1：inode, 1st dnode
+	 
+	 * level = 1, 在2nd dnode包含此地址，则level = 1
+         */
 	block -= direct_blks;
 	if (block < direct_blks) {
 		offset[n++] = NODE_DIR2_BLOCK;
@@ -339,6 +393,33 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 		level = 1;
 		goto got;
 	}
+	/*   
+         * 如果 2 * direct_bllks < block < indirect_blks, 说明inode,2个direct block也不包含此
+         * 地址，indirect block中包含此地址。
+	 *
+         * offset[0] = NODE_IND1_BLOCK, 在第0层（inode）中的索引为NODE_IND1_BLOCK
+         * noffset[0] = 0, 在第0层（inode）中index block的个数为0
+	 *
+	 * offset[1] = block / direct_blks,在第1层（1st indnode）中的索引，为其在indirect block中的索引相当于段地址
+	 * noffset[1] = 3, 在第1层（1st indnode）中index block的个数为3:inode+2*dnode 
+	 *
+	 * offset[2] = block % direct_blks, 在第2层（dnode）中的索引, 为其在dnode中的索引相当于段内偏移 
+	 * noffset[2] = 4+offset[1]=4+block/direct_blks,第2层（dnode）中index block的个数: inode+2*dnode+indnode+block/direct_blks
+	 *
+	 * level = 2, 在1st indirect block包含此地址，则level = 2
+         *  _________________ 
+         * |                 |
+         * |                 |
+         * |_________________|      indirect block
+         * |NODE_IND1_BLOCK  |-----> _________
+         * |_________________|      |         |
+         * |_________________|      |         |     dirict block
+         * |_________________|      |offset[1]|----> _________
+         *                          |_________|     |_________|
+         *                          |         |     |offset[2]|---->addr
+         *                          |_________|     |_________|
+         *                                          |_________|
+	 */
 	block -= direct_blks;
 	if (block < indirect_blks) {
 		offset[n++] = NODE_IND1_BLOCK;
@@ -349,6 +430,36 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 		level = 2;
 		goto got;
 	}
+  	/*
+    	 * 如果indirect_blks < block < 2 * indirect_blks， 说明inode block中不包含，两个direct index block, 第1个indirect block也不包含
+    	 * 而是在2个indirect block中，
+	 *
+	 * offset[0] = NODE_IND2_BLOCK, 在第0层（inode）中的索引为NODE_IND2_BLOCK
+         * noffset[0] = 0, 在第0层（inode）中index block的个数为0
+         *
+         * offset[1] = block / direct_blks,在第1层（2nd indnode）中的索引，为其在indirect block中的索引相当于段地址
+         * noffset[1] = 4 + dptrs_per_blk, 在第1层（2nd indnode）中index block的个数为:inode+2*dnode+indnode+dptrs_per_blk
+         *
+         * offset[2] = block % direct_blks, 在第2层（dnode）中的索引, 为其在dnode中的索引相当于段内偏移 
+         * noffset[2] = 5+dptrs_per_blk+offset[n - 1]=5+dptrs_per_blk+block/direct_blks,在第2层（dnode）中index block的个数: 
+	 *							inode+2*dnode+indnode+dptrs_per_blk+indnode+block/direct_blks
+         *
+         * level = 2, 在2st indirect block包含此地址，则level = 2
+	 *
+	 *  inode block
+    	 *  _________________ 
+    	 * |                 |
+    	 * |                 |
+    	 * |_________________|       indirect block
+    	 * |NODE_IND2_BLOCK  |-----> _________
+    	 * |_________________|      |         |
+    	 * |_________________|      |         |     dirict block
+    	 * |_________________|      |         |      _________
+    	 *                          |_________|     |_________|
+    	 *                          |offset[2]|---->|offset[2]|---->addr
+    	 *                          |_________|     |_________|
+    	 *                                          |_________|
+    	 */
 	block -= indirect_blks;
 	if (block < indirect_blks) {
 		offset[n++] = NODE_IND2_BLOCK;
@@ -359,6 +470,23 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 		level = 2;
 		goto got;
 	}
+	/*
+         * 如果2*indirect_blks < block < dindirect_blks， 说明inode block中不包含，2个direct index block, 2个indirect block也不包含
+         * 而是在dindirect block中，
+         * offset[0] = NODE_DIND_BLOCK, 在第0层（inode）中的索引为NODE_DIND_BLOCK
+	 * noffset[0] = 0, 在第0层（inode）中index block的个数为0	
+
+         * offset[1] = block / indirect_blks, 在第1层（dindnode）中的索引,相当于dindirect block的索引
+	 * noffset[1] = 5+(dptrs_per_blk*2);在第1层（dindnode）中index block的个数:inode+2*dnode+2*indnode+
+
+         * offset[2] = (block / direct_blks) % dptrs_per_blk, 相当于indierct block的索引
+	 * noffset[2] = 6 + (dptrs_per_blk * 2) + offset[n - 1] * (dptrs_per_blk + 1); ???
+
+	 * offset[3] = block % direct_blks, 相当于direct block的索引 
+	 * noffset[3] = 7 + (dptrs_per_blk * 2) + offset[n - 2] * (dptrs_per_blk + 1) + offset[n - 1];???
+	 *
+	 * level = 3, 在dindirect block包含此地址，则level = 3
+	 */
 	block -= indirect_blks;
 	if (block < dindirect_blks) {
 		offset[n++] = NODE_DIND_BLOCK;
@@ -372,6 +500,7 @@ static int get_node_path(long block, int offset[4], unsigned int noffset[4])
 			      offset[n - 1];
 		offset[n++] = block % direct_blks;
 		level = 3;
+
 		goto got;
 	} else {
 		BUG();
@@ -383,6 +512,13 @@ got:
 /*
  * Caller should call f2fs_put_dnode(dn).
  */
+/*
+ * @index: dnode page中的存放的block地址的索引 
+ * 本函数以index = 1941(2nd dnode的第一个index)为例进行说明
+ * 通过dnode中index索引查找到对应的block地址，保存在dn->data_blkaddr中
+ *
+ * note:对于fsync恢复，dn中保存的均为旧的dnode page的内容
+ */
 int get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int ro)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(dn->inode->i_sb);
@@ -393,15 +529,39 @@ int get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int ro)
 	nid_t nids[4];
 	int level, i;
 	int err = 0;
-
+	/* 
+	 * 根据node page的block地址的索引index，获取所处的node level
+	 * 其中offset用于存放index在各级索引中的偏移，通过offset和noffset可以找到index对应的block地址
+	 * (inode:0, dnode:1, indnode:2, dindnode:3)
+	 *
+	 * 以index = 1941为例:
+	 * 则level=1
+	 * offset[0] = NODE_DIR2_BLOCK
+	 * offset[1] = 0
+	 * noffset[0] = 0
+	 * noffset[1] = 2
+	 */
 	level = get_node_path(index, offset, noffset);
 
+	/* 获取index所在的dnode所属的inode的ino */
 	nids[0] = dn->inode->i_ino;
+	/* 
+	 * 获取index所在的dnode所属的f2fs_inode的block page
+	 */
 	npage[0] = get_node_page(sbi, nids[0]);
 	if (IS_ERR(npage[0]))
 		return PTR_ERR(npage[0]);
 
 	parent = npage[0];
+	/* 
+	 * 获取offset[0]对应的nid
+	 *
+	 * 以index=1941为例：
+	 * offset[0]=NODE_DIR2_BLOCK
+	 * nids[1]=f2fs_node->inode.i_nid[NODE_DIR2_BLOCK]=f2fs_node->inode.i_nid[1]
+	 *
+	 * note:对于fsync恢复，f2fs_node->inode.i_nid[1]保存的是旧的dnode的nid
+	 */
 	nids[1] = get_nid(parent, offset[0], true);
 	dn->inode_page = npage[0];
 	dn->inode_page_locked = true;
@@ -441,13 +601,18 @@ int get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int ro)
 			}
 			done = true;
 		}
+		/*index = 1941为例*/
 		if (i == 1) {
 			dn->inode_page_locked = false;
 			unlock_page(parent);
 		} else {
 			f2fs_put_page(parent, 1);
 		}
-
+		/*
+		 * index = 1941为例,npage[1]保存nids[1]对应的node block page
+		 * 
+		 * note:对于fsync恢复，npage[1]保存的是旧的dnode page
+		 */
 		if (!done) {
 			npage[i] = get_node_page(sbi, nids[i]);
 			if (IS_ERR(npage[i])) {
@@ -461,6 +626,13 @@ int get_dnode_of_data(struct dnode_of_data *dn, pgoff_t index, int ro)
 			nids[i + 1] = get_nid(parent, offset[i], false);
 		}
 	}
+	/* 
+	 * index = 1941为例:
+	 * dn->nid=nids[1],2nd dnode对应的nid
+	 * dn->ofs_in_node=offset[1]=0, 在2nd dnode的偏移
+	 * dn->node_page=npage[1]，2nd dnode对应的page
+	 * dn->data_blkaddr=2nd dnode中偏移为0的block块号
+	 */
 	dn->nid = nids[level];
 	dn->ofs_in_node = offset[level];
 	dn->node_page = npage[level];
@@ -847,16 +1019,17 @@ fail:
 	f2fs_put_page(page, 1);
 	return ERR_PTR(err);
 }
-
+/*以page->index为nid获取对应的node block page*/
 static int read_node_page(struct page *page, int type)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(page->mapping->host->i_sb);
 	struct node_info ni;
-
+	/*获取nid(page->index)对应的f2fs nat entry,用于初始化ni*/
 	get_node_info(sbi, page->index, &ni);
 
 	if (ni.blk_addr == NULL_ADDR)
 		return -ENOENT;
+	/*读取ni对应的node block page*/
 	return f2fs_readpage(sbi, page, ni.blk_addr, type);
 }
 
@@ -888,7 +1061,7 @@ unlock_out:
 release_out:
 	page_cache_release(apage);
 }
-
+/*获取nid对应的node block page*/
 struct page *get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid)
 {
 	int err;
@@ -899,6 +1072,7 @@ struct page *get_node_page(struct f2fs_sb_info *sbi, pgoff_t nid)
 	if (!page)
 		return ERR_PTR(-ENOMEM);
 
+	/*以page->index为nid获取对应node block page*/
 	err = read_node_page(page, READ_SYNC);
 	if (err) {
 		f2fs_put_page(page, 1);
@@ -1254,7 +1428,9 @@ static void remove_free_nid(struct f2fs_nm_info *nm_i, nid_t nid)
 	}
 	spin_unlock(&nm_i->free_nid_list_lock);
 }
-
+/**
+ * 从nat entry block的nid的nat entry开始扫描,将block_addr为空的nat entry的nid加入到free nid list
+ */ 
 static int scan_nat_page(struct f2fs_nm_info *nm_i,
 			struct page *nat_page, nid_t start_nid)
 {
@@ -1277,7 +1453,7 @@ static int scan_nat_page(struct f2fs_nm_info *nm_i,
 	}
 	return fcnt;
 }
-
+/* 扫描nat entries，将free nid加入到free nid链表 */
 static void build_free_nids(struct f2fs_sb_info *sbi)
 {
 	struct free_nid *fnid, *next_fnid;
@@ -1291,12 +1467,15 @@ static void build_free_nids(struct f2fs_sb_info *sbi)
 
 	nid = nm_i->next_scan_nid;
 	nm_i->init_scan_nid = nid;
-
+	/* 
+	 * 从nid所在的nat entry block预读FREE_NID_PAGES个block page
+	 * 这样后面直接可以读page，不用再读磁盘
+	 */
 	ra_nat_pages(sbi, nid);
 
 	while (1) {
 		struct page *page = get_current_nat_page(sbi, nid);
-
+		/* 扫描一个nat entry block page,累加free nids */
 		fcnt += scan_nat_page(nm_i, page, nid);
 		f2fs_put_page(page, 1);
 
@@ -1343,6 +1522,7 @@ static void build_free_nids(struct f2fs_sb_info *sbi)
  * from second parameter of this function.
  * The returned nid could be used ino as well as nid when inode is created.
  */
+/* 遍历free_nid_list找到空闲的nid */
 bool alloc_nid(struct f2fs_sb_info *sbi, nid_t *nid)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
@@ -1411,7 +1591,10 @@ void alloc_nid_failed(struct f2fs_sb_info *sbi, nid_t nid)
 	alloc_nid_done(sbi, nid);
 	add_free_nid(NM_I(sbi), nid);
 }
-
+/*
+ * @new_blkaddr: fysnc的dnone block
+ * 就地修改nat_entry
+ */
 void recover_node_page(struct f2fs_sb_info *sbi, struct page *page,
 		struct f2fs_summary *sum, struct node_info *ni,
 		block_t new_blkaddr)
@@ -1500,7 +1683,7 @@ out:
 	__free_pages(page, 0);
 	return 0;
 }
-
+/*遍历current segment的summary nat journal，将dirty nat entry加入nm_i->dirty_nat_entries链表*/
 static bool flush_nats_in_journal(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
@@ -1509,12 +1692,12 @@ static bool flush_nats_in_journal(struct f2fs_sb_info *sbi)
 	int i;
 
 	mutex_lock(&curseg->curseg_mutex);
-
+	/*返回false表示没有flush*/
 	if (nats_in_cursum(sum) < NAT_JOURNAL_ENTRIES) {
 		mutex_unlock(&curseg->curseg_mutex);
 		return false;
 	}
-
+	/*遍历current segment的summary nat journal，将dirty nat entry加入nm_i->dirty_nat_entries链表*/
 	for (i = 0; i < nats_in_cursum(sum); i++) {
 		struct nat_entry *ne;
 		struct f2fs_nat_entry raw_ne;
@@ -1523,12 +1706,14 @@ static bool flush_nats_in_journal(struct f2fs_sb_info *sbi)
 		raw_ne = nat_in_journal(sum, i);
 retry:
 		write_lock(&nm_i->nat_tree_lock);
+		/*首先从nat cache中查找, 如果查找到则转移到nm_i->dirty_nat_entries*/
 		ne = __lookup_nat_cache(nm_i, nid);
 		if (ne) {
 			__set_nat_cache_dirty(nm_i, ne);
 			write_unlock(&nm_i->nat_tree_lock);
 			continue;
 		}
+		/*其次如果在nat cache中没有查找到，则创建新的nat entry并加入到nm_i->dirty_nat_entries*/
 		ne = grab_nat_entry(nm_i, nid);
 		if (!ne) {
 			write_unlock(&nm_i->nat_tree_lock);
@@ -1548,6 +1733,7 @@ retry:
 /**
  * This function is called during the checkpointing process.
  */
+/*flush dirty的nat entry，如果current segment的summary有空间则更新到此，否则更新到nat区*/
 void flush_nat_entries(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
@@ -1559,6 +1745,7 @@ void flush_nat_entries(struct f2fs_sb_info *sbi)
 	nid_t start_nid = 0, end_nid = 0;
 	bool flushed;
 
+	/*遍历current segment的summary nat journal，将dirty nat entry加入nm_i->dirty_nat_entries链表*/
 	flushed = flush_nats_in_journal(sbi);
 
 	if (!flushed)
@@ -1581,12 +1768,14 @@ void flush_nat_entries(struct f2fs_sb_info *sbi)
 			goto to_nat_page;
 
 		/* if there is room for nat enries in curseg->sumpage */
+		/*如果current segment  sum block的nat journal有空间，则更新到此*/
 		offset = lookup_journal_in_cursum(sum, NAT_JOURNAL, nid, 1);
 		if (offset >= 0) {
 			raw_ne = nat_in_journal(sum, offset);
 			old_blkaddr = le32_to_cpu(raw_ne.block_addr);
 			goto flush_now;
 		}
+		/*如果current segment sum block的nat journal没有空间，则更新到nat page*/
 to_nat_page:
 		if (!page || (start_nid > nid || nid > end_nid)) {
 			if (page) {
@@ -1642,7 +1831,7 @@ flush_now:
 	/* 2) shrink nat caches if necessary */
 	try_to_free_nats(sbi, nm_i->nat_cnt - NM_WOUT_THRESHOLD);
 }
-
+/* 初始化node manager info, 重点初始化了nat_bitmap, 它来源于cp  */
 static int init_node_manager(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_super_block *sb_raw = F2FS_RAW_SUPER(sbi);
@@ -1671,7 +1860,7 @@ static int init_node_manager(struct f2fs_sb_info *sbi)
 	nm_i->bitmap_size = __bitmap_size(sbi, NAT_BITMAP);
 	nm_i->init_scan_nid = le32_to_cpu(sbi->ckpt->next_free_nid);
 	nm_i->next_scan_nid = le32_to_cpu(sbi->ckpt->next_free_nid);
-
+	/* 来源于cp区域的nat version bitmap*/
 	nm_i->nat_bitmap = kzalloc(nm_i->bitmap_size, GFP_KERNEL);
 	if (!nm_i->nat_bitmap)
 		return -ENOMEM;

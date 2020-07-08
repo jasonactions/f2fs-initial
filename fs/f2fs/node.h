@@ -9,9 +9,11 @@
  * published by the Free Software Foundation.
  */
 /* start node id of a node block dedicated to the given node id */
+/*NAT区域nid所在的NAT ENTRY BLOCK的首个NAT ENTRY对应的nid*/
 #define	START_NID(nid) ((nid / NAT_ENTRY_PER_BLOCK) * NAT_ENTRY_PER_BLOCK)
 
 /* node block offset on the NAT area dedicated to the given start node id */
+/*NAT区域start_nid所在的NAT ENTRY BLOCK*/
 #define	NAT_BLOCK_OFFSET(start_nid) (start_nid / NAT_ENTRY_PER_BLOCK)
 
 /* # of pages to perform readahead before building free nids */
@@ -35,6 +37,7 @@
 struct node_info {
 	nid_t nid;		/* node id */
 	nid_t ino;		/* inode number of the node's owner */
+	/* node block所处的block地址*/
 	block_t	blk_addr;	/* block address of the node */
 	unsigned char version;	/* version of the node */
 };
@@ -104,15 +107,39 @@ static inline void get_nat_bitmap(struct f2fs_sb_info *sbi, void *addr)
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	memcpy(addr, nm_i->nat_bitmap, nm_i->bitmap_size);
 }
-
-static inline pgoff_t current_nat_addr(struct f2fs_sb_info *sbi, nid_t start)
+/**
+ * 获取nid为start的nat entry所在磁盘的block地址
+ * +-----o nat_blkaddr
+ * |
+ * | NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1|
+ * +-----------------------------------------------------------------------------------+
+ * |  0  |  1  |  2  |  3  |  4  |  5  | ... | SEG |  N-1|  N  | N+1 | ... | 2N-1|  2N |
+ * +-----------------------------------------------------------------------------------+
+ *                                          .       .
+ *                                .                     .
+ *                 .                                          .
+ *                 +-------------------------------------------+
+ *                 | 0 | 1 | 2 | 3 | block |...|...|...|510|511|
+ *                 +-------------------------------------------+
+ *                                .         .
+ *                              .             .
+ *                            .                 .
+ *                          .                     .
+ *                         +-----------------------+
+ *                         | ne | ne | ne |...| ne |        
+ *                         +-----------------------+
+ *
+ */
+ static inline pgoff_t current_nat_addr(struct f2fs_sb_info *sbi, nid_t start)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
 	pgoff_t block_off;
 	pgoff_t block_addr;
 	int seg_off;
 
+	/*NAT区域nid为start的nat netry所在的NAT ENTRY BLOCK*/
 	block_off = NAT_BLOCK_OFFSET(start);
+	/*NAT区域nid为start的nat netry所在的segment*/
 	seg_off = block_off >> sbi->log_blocks_per_seg;
 
 	block_addr = (pgoff_t)(nm_i->nat_blkaddr +
@@ -124,13 +151,45 @@ static inline pgoff_t current_nat_addr(struct f2fs_sb_info *sbi, nid_t start)
 
 	return block_addr;
 }
-
+/* 
+ * 获取nat entry所在block_addr的下一个block addr
+ * +-----o nat_blkaddr
+ * |
+ * | NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1| NAT0| NAT1|
+ * +-----------------------------------------------------------------------------------+
+ * |  0  |  1  |  2  |  3  |  4  |  5  | ... | SEG |  N-1|  N  | N+1 | ... | 2N-1|  2N |
+ * +-----------------------------------------------------------------------------------+
+ *                                          .       .
+ *                                .                     .
+ *                 .                                          .
+ *                 +-------------------------------------------+
+ *                 | 0 | 1 | 2 | 3 | block |...|...|...|510|511|
+ *                 +-------------------------------------------+
+ *                                .         .
+ *                              .             .
+ *                            .                 .
+ *                          .                     .
+ *                         +-----------------------+
+ *                         | ne | ne | ne |...| ne |        
+ *                         +-----------------------+
+ *
+ */
 static inline pgoff_t next_nat_addr(struct f2fs_sb_info *sbi,
 						pgoff_t block_addr)
 {
 	struct f2fs_nm_info *nm_i = NM_I(sbi);
-
+	
+	/*获取相对于nat area起始地址的偏移block块号*/
 	block_addr -= nm_i->nat_blkaddr;
+	
+	/*
+	 * 假设block_addr=1023
+	 *     block_addr>>sbi->log_blocks_per_seg=1，即在segment1
+	 *     (block_addr >> sbi->log_blocks_per_seg) % 2 = 1
+	 * 则：
+	 *　　block_addr - sbi->blocks_per_seg = 1023 - 512 = 511,即下一个block addr为511
+	 * 
+	 */
 	if ((block_addr >> sbi->log_blocks_per_seg) % 2)
 		block_addr -= sbi->blocks_per_seg;
 	else
@@ -179,7 +238,7 @@ static inline void fill_node_footer_blkaddr(struct page *page, block_t blkaddr)
 	rn->footer.cp_ver = ckpt->checkpoint_ver;
 	rn->footer.next_blkaddr = blkaddr;
 }
-
+/* 根据node page获取所属的inode number  */
 static inline nid_t ino_of_node(struct page *node_page)
 {
 	void *kaddr = page_address(node_page);
@@ -193,7 +252,9 @@ static inline nid_t nid_of_node(struct page *node_page)
 	struct f2fs_node *rn = (struct f2fs_node *)kaddr;
 	return le32_to_cpu(rn->footer.nid);
 }
-
+/* 
+ * 获取从inode到当前dnode节点偏移多少个dnode
+ */
 static inline unsigned int ofs_of_node(struct page *node_page)
 {
 	void *kaddr = page_address(node_page);

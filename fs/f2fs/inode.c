@@ -112,12 +112,16 @@ static int do_read_inode(struct inode *inode)
 	return 0;
 }
 
+/**
+ * 根据不同的inode类型来设置inode->i_mapping->a_ops,并设置inode->i_maping的page mask
+ */
 struct inode *f2fs_iget(struct super_block *sb, unsigned long ino)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(sb);
 	struct inode *inode;
 	int ret;
 
+	/* 从当前文件系统的inode cache查询，如果没有则在f2fs_inode_cachep重新创建一个inode */	
 	inode = iget_locked(sb, ino);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
@@ -203,7 +207,7 @@ void update_inode(struct inode *inode, struct page *node_page)
 	ri->i_generation = cpu_to_le32(inode->i_generation);
 	set_page_dirty(node_page);
 }
-
+/*用inode信息更新对应的node block page(通过inode->ino可以拿到对应的node block page)*/
 int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct f2fs_sb_info *sbi = F2FS_SB(inode->i_sb);
@@ -213,7 +217,8 @@ int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 	if (inode->i_ino == F2FS_NODE_INO(sbi) ||
 			inode->i_ino == F2FS_META_INO(sbi))
 		return 0;
-
+	
+	/*获取nid对应的nat entry block page*/
 	node_page = get_node_page(sbi, inode->i_ino);
 	if (IS_ERR(node_page))
 		return PTR_ERR(node_page);
@@ -228,6 +233,7 @@ int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 			return PTR_ERR(node_page);
 		}
 	}
+	/*用inode更新node page*/
 	update_inode(inode, node_page);
 	f2fs_put_page(node_page, 1);
 	if (need_lock)

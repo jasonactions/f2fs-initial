@@ -26,6 +26,7 @@
 #include "f2fs.h"
 #include "node.h"
 #include "xattr.h"
+#include "test.h"
 
 static struct kmem_cache *f2fs_inode_cachep;
 
@@ -316,7 +317,7 @@ static int parse_options(struct f2fs_sb_info *sbi, char *options)
 	}
 	return 0;
 }
-
+/* 最大文件大小 = (923+1080*2 + 1080*1080*2 + 1080*1080*1080)*4096=3.94TB */
 static loff_t max_file_size(unsigned bits)
 {
 	loff_t result = ADDRS_PER_INODE;
@@ -361,8 +362,9 @@ static int sanity_check_ckpt(struct f2fs_super_block *raw_super,
 				struct f2fs_checkpoint *ckpt)
 {
 	unsigned int total, fsmeta;
-
+	/* 除sb之外的segment数量 */
 	total = le32_to_cpu(raw_super->segment_count);
+	/*统计元数据大小，主要包括了cp, sit, nat, reserved segment, ssa*/
 	fsmeta = le32_to_cpu(raw_super->segment_count_ckpt);
 	fsmeta += le32_to_cpu(raw_super->segment_count_sit);
 	fsmeta += le32_to_cpu(raw_super->segment_count_nat);
@@ -391,10 +393,13 @@ static void init_sb_info(struct f2fs_sb_info *sbi)
 	sbi->total_node_count =
 		(le32_to_cpu(raw_super->segment_count_nat) / 2)
 			* sbi->blocks_per_seg * NAT_ENTRY_PER_BLOCK;
+	/* 初始化root inode number,初始化为3 */
 	sbi->root_ino_num = le32_to_cpu(raw_super->root_ino);
+	/* 初始化用于管理node的inode number，初始化为2 */
 	sbi->node_ino_num = le32_to_cpu(raw_super->node_ino);
+	/* 初始化用于管理meta的inode number，初始化为1 */
 	sbi->meta_ino_num = le32_to_cpu(raw_super->meta_ino);
-
+	/* 初始化用于监测几种block类型的nr_page数目 */
 	for (i = 0; i < NR_COUNT_TYPE; i++)
 		atomic_set(&sbi->nr_pages[i], 0);
 }
@@ -408,27 +413,34 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 	long err = -EINVAL;
 	int i;
 
-	/* allocate memory for f2fs-specific super block info */
+	/* =======allocate memory for f2fs-specific super block info */
 	sbi = kzalloc(sizeof(struct f2fs_sb_info), GFP_KERNEL);
 	if (!sbi)
 		return -ENOMEM;
 
-	/* set a temporary block size */
+	/* =======set a temporary block size */
+	/*设置临时的block size大小为4k*/
 	if (!sb_set_blocksize(sb, F2FS_BLKSIZE))
 		goto free_sbi;
 
-	/* read f2fs raw super block */
+	/* ========read f2fs raw super block */
+	/*读取第0个block*/
 	raw_super_buf = sb_bread(sb, 0);
 	if (!raw_super_buf) {
 		err = -EIO;
 		goto free_sbi;
 	}
+	/*第0个block偏移1024字节为真正存放super block的位置*/
 	raw_super = (struct f2fs_super_block *)
 			((char *)raw_super_buf->b_data + F2FS_SUPER_OFFSET);
-
-	/* init some FS parameters */
+	
+	f2fs_dump_raw_sb(raw_super);
+	
+	/* =======init some FS parameters */
+	/*在main area有6个活跃的log(hot/warm/cold data/node)*/
 	sbi->active_logs = NR_CURSEG_TYPE;
 
+	/*设置为支持F2FS_MOUNT_BG_GC*/
 	set_opt(sbi, BG_GC);
 
 #ifdef CONFIG_F2FS_FS_XATTR
@@ -437,18 +449,19 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 #ifdef CONFIG_F2FS_FS_POSIX_ACL
 	set_opt(sbi, POSIX_ACL);
 #endif
-	/* parse mount options */
+	/* ========parse mount options */
 	if (parse_options(sbi, (char *)data))
 		goto free_sb_buf;
 
-	/* sanity checking of raw super */
+	/* ========sanity checking of raw super */
 	if (sanity_check_raw_super(raw_super))
 		goto free_sb_buf;
 
 	sb->s_maxbytes = max_file_size(raw_super->log_blocksize);
+	/* 最大链接文件个数为32000个 */
 	sb->s_max_links = F2FS_LINK_MAX;
 	get_random_bytes(&sbi->s_next_generation, sizeof(u32));
-
+	
 	sb->s_op = &f2fs_sops;
 	sb->s_xattr = f2fs_xattr_handlers;
 	sb->s_export_op = &f2fs_export_ops;
@@ -459,7 +472,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 		(test_opt(sbi, POSIX_ACL) ? MS_POSIXACL : 0);
 	memcpy(sb->s_uuid, raw_super->uuid, sizeof(raw_super->uuid));
 
-	/* init f2fs-specific super block info */
+	/* ===========init f2fs-specific super block info */
 	sbi->sb = sb;
 	sbi->raw_super = raw_super;
 	sbi->raw_super_buf = raw_super_buf;
@@ -474,41 +487,52 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 	init_rwsem(&sbi->bio_sem);
 	init_sb_info(sbi);
 
-	/* get an inode for meta space */
+	/* =========get an inode for meta space */
+	/* 以meta inode number获取一个inode*/
 	sbi->meta_inode = f2fs_iget(sb, F2FS_META_INO(sbi));
 	if (IS_ERR(sbi->meta_inode)) {
 		err = PTR_ERR(sbi->meta_inode);
 		goto free_sb_buf;
 	}
-
+	/* 获取有效的cp block, 有效的cp block必须是checksum正确，且version为最新,此处只读取cp区域的一个block */
 	err = get_valid_checkpoint(sbi);
 	if (err)
 		goto free_meta_inode;
+	f2fs_dump_raw_cp(sbi->ckpt);
 
-	/* sanity checking of checkpoint */
+	/* ==========sanity checking of checkpoint */
 	err = -EINVAL;
+	/* 通过比较meta(cp,sit,nat,ssa)的sgement数量与total segment count(except sb) */
 	if (sanity_check_ckpt(raw_super, sbi->ckpt))
 		goto free_cp;
-
+	/* 统计main area有效node的数目，128M初始镜像为1*/
 	sbi->total_valid_node_count =
 				le32_to_cpu(sbi->ckpt->valid_node_count);
+	/* 统计main area有效inode的数目，128M初始镜像为1 */
 	sbi->total_valid_inode_count =
 				le32_to_cpu(sbi->ckpt->valid_inode_count);
+	/*
+	 * 统计main area user block的数目
+	 * 以128M镜像为例，共64个segment, main area为56个segment,
+	 * 其中user block为30个segement(15360个block), 剩余为overprovision segment 
+	 */
 	sbi->user_block_count = le64_to_cpu(sbi->ckpt->user_block_count);
+	/* 统计main area的有效block数目，128M镜像初始为2 */
 	sbi->total_valid_block_count =
 				le64_to_cpu(sbi->ckpt->valid_block_count);
+	/* 统计main area最新的有效block的数目，主要用于recovery*/
 	sbi->last_valid_block_count = sbi->total_valid_block_count;
 	sbi->alloc_valid_block_count = 0;
 	INIT_LIST_HEAD(&sbi->dir_inode_list);
 	spin_lock_init(&sbi->dir_inode_lock);
 
-	/* init super block */
+	/* ==========init super block */
 	if (!sb_set_blocksize(sb, sbi->blocksize))
 		goto free_cp;
 
 	init_orphan_info(sbi);
 
-	/* setup f2fs internal modules */
+	/* ===========setup f2fs internal modules */
 	err = build_segment_manager(sbi);
 	if (err)
 		goto free_sm;
@@ -559,7 +583,7 @@ static int f2fs_fill_super(struct super_block *sb, void *data, int silent)
 	err = f2fs_build_stats(sbi);
 	if (err)
 		goto fail;
-
+	
 	return 0;
 fail:
 	stop_gc_thread(sbi);
@@ -620,16 +644,22 @@ static void destroy_inodecache(void)
 static int __init init_f2fs_fs(void)
 {
 	int err;
-
+	/*创建struct f2fs_inode_info的slab缓存,描述符为f2fs_inode_cachep*/
 	err = init_inodecache();
 	if (err)
 		goto fail;
+	/*创建struct nat_entry,struct free_nid的slab缓存,描述符为nat_entry, free_nid*/
 	err = create_node_manager_caches();
 	if (err)
 		goto fail;
+	/*创建struct inode的slab缓存，描述符为f2fs_gc_inodes*/
 	err = create_gc_caches();
 	if (err)
 		goto fail;
+	/* 
+	 * 创建struct orphan_inode_entry和struct dir_inode_entry的slab缓存，
+	 * 描述符为f2fs_orphan_entry和f2fs_dirty_dir_entry的slab
+	 */
 	err = create_checkpoint_caches();
 	if (err)
 		goto fail;

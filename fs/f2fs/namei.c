@@ -17,7 +17,7 @@
 #include "f2fs.h"
 #include "xattr.h"
 #include "acl.h"
-
+/* 创建一个新的inode，链入全局inode链表 */
 static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
@@ -32,6 +32,7 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 		return ERR_PTR(-ENOMEM);
 
 	mutex_lock_op(sbi, NODE_NEW);
+	/* 分配一个新的nid,保存到ino  */
 	if (!alloc_nid(sbi, &ino)) {
 		mutex_unlock_op(sbi, NODE_NEW);
 		err = -ENOSPC;
@@ -55,13 +56,14 @@ static struct inode *f2fs_new_inode(struct inode *dir, umode_t mode)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->i_generation = sbi->s_next_generation++;
 
+	/* 插入到inode全局哈希链表 */
 	err = insert_inode_locked(inode);
 	if (err) {
 		err = -EINVAL;
 		nid_free = true;
 		goto out;
 	}
-
+	/* 标记inode的I_DIRTY标记*/
 	mark_inode_dirty(inode);
 	return inode;
 
@@ -122,17 +124,21 @@ static int f2fs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	struct inode *inode;
 	nid_t ino = 0;
 	int err;
+	
+	dump_stack();
 
 	inode = f2fs_new_inode(dir, mode);
 	if (IS_ERR(inode))
 		return PTR_ERR(inode);
 
+	/*如果是多媒体文件，则设置cold文件标记*/
 	if (!test_opt(sbi, DISABLE_EXT_IDENTIFY))
 		set_cold_file(sbi, inode, dentry->d_name.name);
 
 	inode->i_op = &f2fs_file_inode_operations;
 	inode->i_fop = &f2fs_file_operations;
 	inode->i_mapping->a_ops = &f2fs_dblock_aops;
+	printk(KERN_ERR "%s %p\n", __func__, inode->i_mapping->a_ops);
 	ino = inode->i_ino;
 
 	err = f2fs_add_link(dentry, inode);

@@ -115,7 +115,7 @@ void stop_gc_thread(struct f2fs_sb_info *sbi)
 	kfree(gc_th);
 	sbi->gc_thread = NULL;
 }
-
+/* @type: GC_CB or GC_GREEDY  */
 static int select_gc_type(int gc_type)
 {
 	return (gc_type == BG_GC) ? GC_CB : GC_GREEDY;
@@ -126,11 +126,11 @@ static void select_policy(struct f2fs_sb_info *sbi, int gc_type,
 {
 	struct dirty_seglist_info *dirty_i = DIRTY_I(sbi);
 
-	if (p->alloc_mode) {
+	if (p->alloc_mode) {/* SSR MODE*/
 		p->gc_mode = GC_GREEDY;
 		p->dirty_segmap = dirty_i->dirty_segmap[type];
 		p->ofs_unit = 1;
-	} else {
+	} else { /* LFS MODE*/
 		p->gc_mode = select_gc_type(gc_type);
 		p->dirty_segmap = dirty_i->dirty_segmap[DIRTY];
 		p->ofs_unit = sbi->segs_per_sec;
@@ -167,7 +167,18 @@ static unsigned int check_bg_victims(struct f2fs_sb_info *sbi)
 	}
 	return NULL_SEGNO;
 }
-
+/*
+ * Cost-Benefit算法 Cost-Benefit算法是一个同时考虑最近一次修改时间以及invalid block个数的算法。
+ * 因为相当于频繁修改的数据而言，不值得进行GC，因为GC完很快就修改了，同时由于异地更新的特性，导致继续产生invalid block。
+ * 较长时间未作修改的数据，可以认为迁移以后也相对没那么频繁继续产生invalid block。Cost-Benefit算法的核心是:
+ *
+ * cost = (1 - u) / 2u * age
+ * 其中
+ * u: 表示valid block在该section中的比例
+ * 1-u: 表示对这个section进行gc后的收益
+ * 2u:  表示对这个section的GC的开销，读取Valid block（1个u）然后写入到到新的segment（再1个u）
+ * age: 表示上一次修改时间
+ */
 static unsigned int get_cb_cost(struct f2fs_sb_info *sbi, unsigned int segno)
 {
 	struct sit_info *sit_i = SIT_I(sbi);
@@ -178,14 +189,16 @@ static unsigned int get_cb_cost(struct f2fs_sb_info *sbi, unsigned int segno)
 	unsigned char age = 0;
 	unsigned char u;
 	unsigned int i;
-
+	/* 计算section里面的每一个segment最近一次访问时间 */
 	for (i = 0; i < sbi->segs_per_sec; i++)
 		mtime += get_seg_entry(sbi, start + i)->mtime;
+	/* 获取当前的section有多少个valid block */
 	vblocks = get_valid_blocks(sbi, segno, sbi->segs_per_sec);
-
+	/* 计算平均每一segment的最近一次访问时间 */
 	mtime = div_u64(mtime, sbi->segs_per_sec);
+	/* 计算平均每一个segment的valid block个数 */
 	vblocks = div_u64(vblocks, sbi->segs_per_sec);
-
+	/* 百分比计算所以乘以100，然后计算得到了valid block的比例 */
 	u = (vblocks * 100) >> sbi->log_blocks_per_seg;
 
 	/* Handle if the system time is changed by user */
@@ -196,7 +209,11 @@ static unsigned int get_cb_cost(struct f2fs_sb_info *sbi, unsigned int segno)
 	if (sit_i->max_mtime != sit_i->min_mtime)
 		age = 100 - div64_u64(100 * (mtime - sit_i->min_mtime),
 				sit_i->max_mtime - sit_i->min_mtime);
-
+	
+	/*
+	 * 公式((100 * (100 - u) * age) / (100 + u))即对应(1 - u) / 2u * age,做了一些变换
+	 * 使用UINT_MAX减去这个值的原因是f2fs要维持cost越高，越不值得被gc的特征  
+	 */
 	return UINT_MAX - ((100 * (100 - u) * age) / (100 + u));
 }
 
@@ -208,8 +225,10 @@ static unsigned int get_gc_cost(struct f2fs_sb_info *sbi, unsigned int segno,
 
 	/* alloc_mode == LFS */
 	if (p->gc_mode == GC_GREEDY)
+		/* Greedy算法，valid block越多表示cost越大，越不值得gc  */
 		return get_valid_blocks(sbi, segno, sbi->segs_per_sec);
 	else
+		/* Cost-Benefit算法，这个是考虑了访问时间和valid block开销的算法  */
 		return get_cb_cost(sbi, segno);
 }
 
@@ -220,6 +239,12 @@ static unsigned int get_gc_cost(struct f2fs_sb_info *sbi, unsigned int segno,
  * and it does not remove it from dirty seglist.
  * When it is called from SSR segment selection, it finds a segment
  * which has minimum valid blocks and removes it from dirty seglist.
+ *
+ * @gc_type: BG_GC or FG_GC
+ * @type: GC_CB or GC_GREEDY
+ * @alloc_mode: LFS or SSA
+ * @result: 存放选取的section no
+ * return: 返回是否找到cost最小的segment
  */
 static int get_victim_by_default(struct f2fs_sb_info *sbi,
 		unsigned int *result, int gc_type, int type, char alloc_mode)
@@ -233,10 +258,17 @@ static int get_victim_by_default(struct f2fs_sb_info *sbi,
 	select_policy(sbi, gc_type, type, &p);
 
 	p.min_segno = NULL_SEGNO;
+	/*
+	 * get_victim_by_default函数目的是找到一个cost最低的segment进行回收
+	 * 因此在找到之前需要设定一个最大cost，用于一步步遍历降低cost
+	 */
 	p.min_cost = get_max_cost(sbi, &p);
 
 	mutex_lock(&dirty_i->seglist_lock);
-
+	/* 
+	 * 前台gc模式要求快速释放空间，因此不做循环寻找，
+	 * 直接找到之前BG GC的时候所记录下来适合gc的的segment进行gc  
+	 */
 	if (p.alloc_mode == LFS && gc_type == FG_GC) {
 		p.min_segno = check_bg_victims(sbi);
 		if (p.min_segno != NULL_SEGNO)
@@ -245,7 +277,7 @@ static int get_victim_by_default(struct f2fs_sb_info *sbi,
 
 	while (1) {
 		unsigned long cost;
-
+		/* 从p.offset开始，查找p.dirty_segmap中第一个置位的bit的位索引,它对应segno */
 		segno = find_next_bit(p.dirty_segmap,
 						TOTAL_SEGS(sbi), p.offset);
 		if (segno >= TOTAL_SEGS(sbi)) {
@@ -265,9 +297,9 @@ static int get_victim_by_default(struct f2fs_sb_info *sbi,
 			continue;
 		if (IS_CURSEC(sbi, GET_SECNO(sbi, segno)))
 			continue;
-
+		/* 计算选中的segment的cost */
 		cost = get_gc_cost(sbi, segno, &p);
-
+		/* 判断更新最小cost */
 		if (p.min_cost > cost) {
 			p.min_segno = segno;
 			p.min_cost = cost;
@@ -275,7 +307,7 @@ static int get_victim_by_default(struct f2fs_sb_info *sbi,
 
 		if (cost == get_max_cost(sbi, &p))
 			continue;
-
+		/* 达到了最大搜索次数即退出 */
 		if (nsearched++ >= MAX_VICTIM_SEARCH) {
 			sbi->last_victim[p.gc_mode] = segno;
 			break;
@@ -286,6 +318,7 @@ got_it:
 		*result = (p.min_segno / p.ofs_unit) * p.ofs_unit;
 		if (p.alloc_mode == LFS) {
 			int i;
+			/* 在dirty_i->victim_segmap中置位选取的segment */
 			for (i = 0; i < p.ofs_unit; i++)
 				set_bit(*result + i,
 					dirty_i->victim_segmap[gc_type]);
@@ -364,6 +397,7 @@ static int check_valid_map(struct f2fs_sb_info *sbi,
  * On validity, copy that node with cold status, otherwise (invalid node)
  * ignore that.
  */
+/*对选定的segment，根据其summary执行GC, 将valid block回写*/
 static int gc_node_segment(struct f2fs_sb_info *sbi,
 		struct f2fs_summary *sum, unsigned int segno, int gc_type)
 {
@@ -394,7 +428,7 @@ next_step:
 			return err;
 		else if (err == GC_NEXT)
 			continue;
-
+		/*预读需要gc的section中的所有的segment的f2fs_summary*/
 		if (initial) {
 			ra_node_page(sbi, nid);
 			continue;
@@ -413,7 +447,7 @@ next_step:
 		initial = false;
 		goto next_step;
 	}
-
+	/*如果是前台GC则需要手动执行sync，如果是后台回收则通过swap线程周期性刷新page cache*/
 	if (gc_type == FG_GC) {
 		struct writeback_control wbc = {
 			.sync_mode = WB_SYNC_ALL,
@@ -428,6 +462,7 @@ next_step:
 /**
  * Calculate start block index that this node page contains
  */
+/* 返回node page的首个block地址的索引 */
 block_t start_bidx_of_node(unsigned int node_ofs)
 {
 	block_t start_bidx;

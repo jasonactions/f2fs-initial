@@ -137,9 +137,10 @@ int f2fs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		return ret;
 
 	mutex_lock(&inode->i_mutex);
-
+	/*如果是只读挂载，则直接退出*/
 	if (inode->i_sb->s_flags & MS_RDONLY)
 		goto out;
+	/*如果是datasync而非fsync则退出，datasync不做元数据同步，而fsync需要做元数据同步*/
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
 		goto out;
 
@@ -160,7 +161,7 @@ int f2fs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		need_cp = true;
 	if (need_to_sync_dir(sbi, inode))
 		need_cp = true;
-
+	/*用inode信息更新对应的node block page(通过inode->ino可以拿到对应的node block page)*/
 	f2fs_write_inode(inode, NULL);
 
 	if (need_cp) {
@@ -184,7 +185,10 @@ static int f2fs_file_mmap(struct file *file, struct vm_area_struct *vma)
 	vma->vm_ops = &f2fs_file_vm_ops;
 	return 0;
 }
-
+/* 
+ * 从dnode_of_data->ofs_in_node索引开始，将count个data block置为无效
+ * 无效方法就是将data block对应的sit entry的bit map置位或清零
+ */
 static int truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 {
 	int nr_free = 0, ofs = dn->ofs_in_node;
@@ -193,14 +197,17 @@ static int truncate_data_blocks_range(struct dnode_of_data *dn, int count)
 	__le32 *addr;
 
 	raw_node = page_address(dn->node_page);
+	
 	addr = blkaddr_in_node(raw_node) + ofs;
 
 	for ( ; count > 0; count--, addr++, dn->ofs_in_node++) {
+		/* (*addr)为要无效的block块号 */
 		block_t blkaddr = le32_to_cpu(*addr);
 		if (blkaddr == NULL_ADDR)
 			continue;
 
 		update_extent_cache(NULL_ADDR, dn);
+		/*主要通过修改sit entry中对应的bit map以及valid blocks来标示一个block无效*/
 		invalidate_blocks(sbi, blkaddr);
 		dec_valid_block_count(sbi, dn->inode, 1);
 		nr_free++;
@@ -396,7 +403,7 @@ static void fill_zero(struct inode *inode, pgoff_t index,
 		f2fs_put_page(page, 1);
 	}
 }
-
+/* 将dnode block中索引号为pg_start~pg_end之间的block无效 */
 int truncate_hole(struct inode *inode, pgoff_t pg_start, pgoff_t pg_end)
 {
 	pgoff_t index;
@@ -415,7 +422,10 @@ int truncate_hole(struct inode *inode, pgoff_t pg_start, pgoff_t pg_end)
 				continue;
 			return err;
 		}
-
+		/*
+		 * 将dn->ofs_in_node索引对应的data block置为无效
+		 * 无效方法就是将data block对应的sit entry的bit map置位或清零
+		 */
 		if (dn.data_blkaddr != NULL_ADDR)
 			truncate_data_blocks_range(&dn, 1);
 		f2fs_put_dnode(&dn);

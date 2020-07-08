@@ -286,6 +286,7 @@ static int stat_show(struct seq_file *s, void *v)
 		seq_printf(s, "\nMemory: %u KB = static: %u + cached: %u\n",
 				(si->base_mem + si->cache_mem) >> 10,
 				si->base_mem >> 10, si->cache_mem >> 10);
+
 		mutex_unlock(&si->stat_lock);
 	}
 	return 0;

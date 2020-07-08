@@ -263,7 +263,7 @@ static void recover_orphan_inode(struct f2fs_sb_info *sbi, nid_t ino)
 	/* truncate all the data during iput */
 	iput(inode);
 }
-
+/* 遍历orphan entry block的每个orphan entry, 每个entry代表一个inode，对其执行recovery  */
 int recover_orphan_inodes(struct f2fs_sb_info *sbi)
 {
 	block_t start_blk, orphan_blkaddr, i, j;
@@ -349,7 +349,13 @@ page_exist:
 end:
 	mutex_unlock(&sbi->orphan_inode_mutex);
 }
-
+/**
+ * 对cp1和cp2进行crc校验
+ *
+ * 从磁盘读取cp的1st的cp pack block(8 block),并进行crc校验,校验通过则获取cp version
+ * 从磁盘读取cp的2nd的cp pack block(8 block),并进行crc校验,校验通过则获取cp version
+ * 只有两个cp version相同时才赋值给version
+ */
 static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
 				block_t cp_addr, unsigned long long *version)
 {
@@ -359,6 +365,8 @@ static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
 	unsigned long long cur_version = 0, pre_version = 0;
 	unsigned int crc = 0;
 	size_t crc_offset;
+
+	printk(KERN_ERR "%s cp_addr: %lld\n", __func__, cp_addr); 
 
 	/* Read the 1st cp block in this CP pack */
 	cp_page_1 = get_meta_page(sbi, cp_addr);
@@ -374,9 +382,11 @@ static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
 		goto invalid_cp1;
 
 	pre_version = le64_to_cpu(cp_block->checkpoint_ver);
-
+	printk(KERN_ERR "%s pre_version: %lld\n", __func__, pre_version);
 	/* Read the 2nd cp block in this CP pack */
+	/* 实际2nd cp block并未发现？ */
 	cp_addr += le64_to_cpu(cp_block->cp_pack_total_block_count) - 1;
+	printk(KERN_ERR "%s cp_addr: %lld\n", __func__, cp_addr); 
 	cp_page_2 = get_meta_page(sbi, cp_addr);
 
 	cp_block = (struct f2fs_checkpoint *)page_address(cp_page_2);
@@ -389,7 +399,7 @@ static struct page *validate_checkpoint(struct f2fs_sb_info *sbi,
 		goto invalid_cp2;
 
 	cur_version = le64_to_cpu(cp_block->checkpoint_ver);
-
+	printk(KERN_ERR "%s cur_version: %lld\n", __func__, cur_version); 
 	if (cur_version == pre_version) {
 		*version = cur_version;
 		f2fs_put_page(cp_page_2, 1);
@@ -418,29 +428,35 @@ int get_valid_checkpoint(struct f2fs_sb_info *sbi)
 	 * Finding out valid cp block involves read both
 	 * sets( cp pack1 and cp pack 2)
 	 */
+	/* 初始化cp的block起始地址，为0x200，此处可以看出super block区域占用了1个segement,即512个block*/
 	cp_start_blk_no = le32_to_cpu(fsb->cp_blkaddr);
 	cp1 = validate_checkpoint(sbi, cp_start_blk_no, &cp1_version);
 
 	/* The second checkpoint pack should start at the next segment */
+	/* 每个cp占用一个segment,此处cp_start_blk_no为第二个cp的起始地址*/
 	cp_start_blk_no += 1 << le32_to_cpu(fsb->log_blocks_per_seg);
 	cp2 = validate_checkpoint(sbi, cp_start_blk_no, &cp2_version);
-
+	/* 找到有效的cp，如果两个cp都有效则选取最新的 */
 	if (cp1 && cp2) {
+		printk(KERN_ERR "cp1 && cp2 valid!\n");
 		if (ver_after(cp2_version, cp1_version))
 			cur_page = cp2;
 		else
 			cur_page = cp1;
 	} else if (cp1) {
+		printk(KERN_ERR "cp1 valid!\n");
 		cur_page = cp1;
 	} else if (cp2) {
 		cur_page = cp2;
+		printk(KERN_ERR "cp2 valid!\n");
 	} else {
+		printk(KERN_ERR "fail no cp!\n");
 		goto fail_no_cp;
 	}
 
 	cp_block = (struct f2fs_checkpoint *)page_address(cur_page);
 	memcpy(sbi->ckpt, cp_block, blk_size);
-
+	
 	f2fs_put_page(cp1, 1);
 	f2fs_put_page(cp2, 1);
 	return 0;
@@ -597,7 +613,24 @@ static void unblock_operations(struct f2fs_sb_info *sbi)
 	for (t = NODE_WRITE; t >= RENAME; t--)
 		mutex_unlock_op(sbi, t);
 }
-
+/* normal mode:
+ *
+ * |<-----------------------------cp pack 1(1 segment)-------------------------------------->|<----cp pack 2(1 segment)----------->|
+ * |  1 block  |   n blocks  |    3 blocks    |   3 blocks     |  1 block   | (512-n-8)blocks|                                     |
+ * +-----------+----------------+----------------+-----------+--------------+----------------+-------------------------------------+
+ * | cp page 1 | orphan node | data summaries | node summaries | cp page 2  |                | cp page 1 |                         |
+ * +-----------+----------------+----------------+-----------+--------------+----------------+-------------------------------------+
+ *                             .             ..                .
+ *                         .                . .                   .
+ *                    .                     . .                       .
+ *                .                         . .                            .
+ *          .                               . .                                 .
+ *   .                                      . .                                      .
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * |hot data sum|warm data sum|cold data sum| |hot data sum|warm data sum|cold data sum|
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * |   1 block  |    1 block  |   1 block   | |   1 block  |  1 block    |  1 block    |
+ */
 static void do_checkpoint(struct f2fs_sb_info *sbi, bool is_umount)
 {
 	struct f2fs_checkpoint *ckpt = F2FS_CKPT(sbi);
@@ -728,6 +761,9 @@ static void do_checkpoint(struct f2fs_sb_info *sbi, bool is_umount)
 /**
  * We guarantee that this checkpoint procedure should not fail.
  */
+/*
+ * 同步元数据，包括cp区域，SIT区域，NAT区域
+ */
 void write_checkpoint(struct f2fs_sb_info *sbi, bool blocked, bool is_umount)
 {
 	struct f2fs_checkpoint *ckpt = F2FS_CKPT(sbi);
@@ -737,9 +773,11 @@ void write_checkpoint(struct f2fs_sb_info *sbi, bool blocked, bool is_umount)
 		mutex_lock(&sbi->cp_mutex);
 		block_operations(sbi);
 	}
-
+	/*将data block的page cache submit bio*/
 	f2fs_submit_bio(sbi, DATA, true);
+	/*将node block的page cache submit bio*/
 	f2fs_submit_bio(sbi, NODE, true);
+	/*将meta(NAT SIT SSA)的page cache submit bio*/
 	f2fs_submit_bio(sbi, META, true);
 
 	/*

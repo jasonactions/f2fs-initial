@@ -373,6 +373,9 @@ int f2fs_readpage(struct f2fs_sb_info *sbi, struct page *page,
  * The reason for this special functionality is to exploit VFS readahead
  * mechanism.
  */
+/*
+ * @iblock: 文件逻辑偏移
+ */
 static int get_data_block_ro(struct inode *inode, sector_t iblock,
 			struct buffer_head *bh_result, int create)
 {
@@ -390,6 +393,7 @@ static int get_data_block_ro(struct inode *inode, sector_t iblock,
 
 	/* When reading holes, we need its node page */
 	set_new_dnode(&dn, inode, NULL, NULL, 0);
+	/* 以pgofs(文件逻辑偏移)作为dnode block索引获取到block addr保存到dn.data_blkaddr */
 	err = get_dnode_of_data(&dn, pgofs, RDONLY_NODE);
 	if (err)
 		return (err == -ENOENT) ? 0 : err;
@@ -422,6 +426,8 @@ static int get_data_block_ro(struct inode *inode, sector_t iblock,
 
 static int f2fs_read_data_page(struct file *file, struct page *page)
 {
+	dump_stack();
+	printk(KERN_ERR "%s enter!\n", __func__);
 	return mpage_readpage(page, get_data_block_ro);
 }
 
@@ -441,6 +447,7 @@ int do_write_data_page(struct page *page)
 	int err = 0;
 
 	set_new_dnode(&dn, inode, NULL, NULL, 0);
+	/*通过page->index查找dnode中对应的block地址，保存在dn->data_blkaddr中*/
 	err = get_dnode_of_data(&dn, page->index, RDONLY_NODE);
 	if (err)
 		return err;
@@ -571,7 +578,7 @@ int f2fs_write_data_pages(struct address_space *mapping,
 	wbc->nr_to_write -= excess_nrtw;
 	return ret;
 }
-
+/*写入page cache前的处理*/
 static int f2fs_write_begin(struct file *file, struct address_space *mapping,
 		loff_t pos, unsigned len, unsigned flags,
 		struct page **pagep, void **fsdata)
@@ -596,13 +603,17 @@ static int f2fs_write_begin(struct file *file, struct address_space *mapping,
 	mutex_lock_op(sbi, DATA_NEW);
 
 	set_new_dnode(&dn, inode, NULL, NULL, 0);
+	/*通过index在dnode中查找到对应的block地址，保存在dn->data_blkaddr中*/
 	err = get_dnode_of_data(&dn, index, 0);
 	if (err) {
 		mutex_unlock_op(sbi, DATA_NEW);
 		f2fs_put_page(page, 1);
 		return err;
 	}
-
+	/*
+	 * 如果该位置的值是NULL_ADDR则表示当前是添加写(Append Write)，因此将值初始化为NEW_ADDR;
+	 * 如果是该位置的值是一个具体的block号，那么表示为覆盖写(Overwrite)，不需要做处理。
+	 */
 	if (dn.data_blkaddr == NULL_ADDR) {
 		err = reserve_new_block(&dn);
 		if (err) {
@@ -627,10 +638,10 @@ static int f2fs_write_begin(struct file *file, struct address_space *mapping,
 		zero_user_segments(page, 0, start, end, PAGE_CACHE_SIZE);
 		return 0;
 	}
-
+	/*如果是添加写，则将该page直接使用0填充*/
 	if (dn.data_blkaddr == NEW_ADDR) {
 		zero_user_segment(page, 0, PAGE_CACHE_SIZE);
-	} else {
+	} else {/*如果是覆盖写，从磁盘中将旧数据读取出来*/
 		err = f2fs_readpage(sbi, page, dn.data_blkaddr, READ_SYNC);
 		if (err) {
 			f2fs_put_page(page, 1);

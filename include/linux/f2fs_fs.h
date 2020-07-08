@@ -28,6 +28,12 @@
 #define F2FS_META_INO(sbi)	(sbi->meta_ino_num)
 
 /* This flag is used by node and meta inodes, and by recovery */
+/* GFP_NOFS:__GFP_WAIT | __GFP_IO
+ * 	允许内核对等待空间页框的当前进程阻塞；
+ * 	允许内核在低端内存页上执行IO传输以释放页框
+ * __GFP_ZERO：任何返回的页框必须被填满0
+ * 
+ */
 #define GFP_F2FS_ZERO	(GFP_NOFS | __GFP_ZERO)
 
 /*
@@ -54,22 +60,39 @@ struct f2fs_super_block {
 	__le32 segs_per_sec;		/* # of segments per section */
 	__le32 secs_per_zone;		/* # of sections per zone */
 	__le32 checksum_offset;		/* checksum offset inside super block */
+	/* 全部block的数目，包含了sb,cp,sit,nat,ssa,main area  */
 	__le64 block_count;		/* total # of user blocks */
+	/*统计section的数目，只包含main区域*/
 	__le32 section_count;		/* total # of sections */
+	/* segment的数目，不包含sb所占用的segment */
 	__le32 segment_count;		/* total # of segments */
+	/* cp 区域的segment数目*/
 	__le32 segment_count_ckpt;	/* # of segments for checkpoint */
+	/* sit区域的segment数目*/
 	__le32 segment_count_sit;	/* # of segments for SIT */
+	/* nat区域的segment数目*/
 	__le32 segment_count_nat;	/* # of segments for NAT */
+	/* ssa 区域的segment数目*/
 	__le32 segment_count_ssa;	/* # of segments for SSA */
+	/* main 区域的segment数目*/
 	__le32 segment_count_main;	/* # of segments for main area */
+	/* 从cp区域的第0个block开始算起, 一般为0x200 */
 	__le32 segment0_blkaddr;	/* start block address of segment 0 */
+	/* cp区域的第0个block的地址*/
 	__le32 cp_blkaddr;		/* start block address of checkpoint */
+	/* sit区域的第0个block的地址 */
 	__le32 sit_blkaddr;		/* start block address of SIT */
+	/* nat区域的第0个block的地址 */
 	__le32 nat_blkaddr;		/* start block address of NAT */
+	/* ssa区域的第0个block的地址 */
 	__le32 ssa_blkaddr;		/* start block address of SSA */
+	/* main区域的第0个block的地址 */
 	__le32 main_blkaddr;		/* start block address of main area */
+	/*实际打印为3*/
 	__le32 root_ino;		/* root inode number */
+	/*实际打印为2*/
 	__le32 node_ino;		/* node inode number */
+	/*实际打印为1*/
 	__le32 meta_ino;		/* meta inode number */
 	__u8 uuid[16];			/* 128-bit uuid for volume */
 	__le16 volume_name[512];	/* volume name */
@@ -85,6 +108,42 @@ struct f2fs_super_block {
 #define CP_ORPHAN_PRESENT_FLAG	0x00000002
 #define CP_UMOUNT_FLAG		0x00000001
 
+/* normal mode:
+ *
+ * |<-----------------------------cp pack 1(1 segment)-------------------------------------->|<----cp pack 2(1 segment)----------->|
+ * |  1 block  |   n blocks  |    3 blocks    |   3 blocks     |  1 block   | (512-n-8)blocks|                                     |
+ * +-----------+----------------+----------------+-----------+--------------+----------------+-------------------------------------+
+ * | cp page 1 | orphan node | cur data sums  | cur node sums  | cp page 2  |                |                                     |
+ * +-----------+----------------+----------------+-----------+--------------+----------------+-------------------------------------+
+ *                             .             . .                .
+ *                         .                . .                     .
+ *                    .                     . .                         .
+ *                .                         . .                             .
+ *          .                               . .                                 .
+ *   .                                      . .                                      .
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * |hot data sum|warm data sum|cold data sum| |hot node sum|warm node sum|cold node sum|
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * |   1 block  |    1 block  |   1 block   | |   1 block  |  1 block    |  1 block    |
+ *
+ * compact mode:
+ *
+ * |<-----------------------------cp pack 1(1 segment)--------------------------------------->|<----cp pack 2(1 segment)----------->|
+ * |  1 block  |   n blocks  |    3 blocks     |   3 blocks     |  1 block   | (512-n-8)blocks|                                     |
+ * +-----------+----------------+--------------+----------------+------------+----------------+-------------------------------------+
+ * | cp page 1 | orphan node |compact summaries| cur node sums  | cp page 2  |                |                                     |
+ * +-----------+----------------+----------------+------------+--------------+----------------+-------------------------------------+
+ *                             .             . .                .
+ *                         .                . .                     .
+ *                    .                     . .                         .
+ *                .                         . .                             .
+ *          .                               . .                                 .
+ *   .                                      . .                                      .
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * | nat journal| sit journal |   data sum  | |hot node sum|warm node sum|cold node sum|
+ * +------------+-------------+-------------+ +------------+-------------+-------------+
+ * |   1 block  |    1 block  |   1 block   | |   1 block  |  1 block    |  1 block    |
+ */
 struct f2fs_checkpoint {
 	__le64 checkpoint_ver;		/* checkpoint block version number */
 	__le64 user_block_count;	/* # of user blocks */
@@ -100,9 +159,13 @@ struct f2fs_checkpoint {
 	__le32 cur_data_segno[MAX_ACTIVE_DATA_LOGS];
 	__le16 cur_data_blkoff[MAX_ACTIVE_DATA_LOGS];
 	__le32 ckpt_flags;		/* Flags : umount and journal_present */
+	/* 对于128M镜像，初始值为8 */
 	__le32 cp_pack_total_block_count;	/* total # of one cp pack */
+	/*  cp数据是从cp区域的第1个block开始,跳过第0个block */
 	__le32 cp_pack_start_sum;	/* start block number of data summary */
+	/* 对于128M镜像，初始为1 */
 	__le32 valid_node_count;	/* Total number of valid nodes */
+	/* 对于128M镜像，初始为1 */
 	__le32 valid_inode_count;	/* Total number of valid inodes */
 	__le32 next_free_nid;		/* Next free node number */
 	__le32 sit_ver_bitmap_bytesize;	/* Default value 64 */
@@ -113,6 +176,10 @@ struct f2fs_checkpoint {
 	unsigned char alloc_type[MAX_ACTIVE_LOGS];
 
 	/* SIT and NAT version bitmap */
+	/* 此处相当于占位符，记录sit & nat version bitmap的地址
+	 * 这块区域用于存放sit&&nat version bit map, 依次是sit version bitmap和nat version bitmap
+	 * 用于记录sit区域和nat区域的有效block的bitmap
+	 */
 	unsigned char sit_nat_version_bitmap[1];
 } __packed;
 
@@ -143,7 +210,7 @@ struct f2fs_extent {
 #define ADDRS_PER_INODE         923	/* Address Pointers in an Inode */
 #define ADDRS_PER_BLOCK         1018	/* Address Pointers in a Direct Block */
 #define NIDS_PER_BLOCK          1018	/* Node IDs in an Indirect Block */
-
+/*占用4060字节*/
 struct f2fs_inode {
 	__le16 i_mode;			/* file mode */
 	__u8 i_advise;			/* file hints */
@@ -197,7 +264,11 @@ struct node_footer {
 	__le64 cp_ver;		/* checkpoint version */
 	__le32 next_blkaddr;	/* next node page block address */
 } __packed;
-
+/**
+ * node分为三种：f2fs_inode, direct_node, indirect_node
+ * 每种各占一个block，其中indirect_node可指向多个dnode
+ * 因此一个文件的元数据可由多个node构成, 但是每个文件只有唯一的inode
+ */
 struct f2fs_node {
 	/* can be one of three types: inode, direct, and indirect types */
 	union {
@@ -240,12 +311,17 @@ struct f2fs_nat_block {
  */
 #define SIT_VBLOCKS_SHIFT	10
 #define SIT_VBLOCKS_MASK	((1 << SIT_VBLOCKS_SHIFT) - 1)
+/* 获取sgement中有效block的count */
 #define GET_SIT_VBLOCKS(raw_sit)				\
 	(le16_to_cpu((raw_sit)->vblocks) & SIT_VBLOCKS_MASK)
+/* 获取segment的类型 */
 #define GET_SIT_TYPE(raw_sit)					\
 	((le16_to_cpu((raw_sit)->vblocks) & ~SIT_VBLOCKS_MASK)	\
 	 >> SIT_VBLOCKS_SHIFT)
-
+/*
+ * 类似于LFS的segment usage table entry
+ * 记录segment有效块的数量和map以及age，用于回收时选择
+ */
 struct f2fs_sit_entry {
 	__le16 vblocks;				/* reference above */
 	__u8 valid_map[SIT_VBLOCK_MAP_SIZE];	/* bitmap for valid blocks */
@@ -271,9 +347,12 @@ struct f2fs_sit_block {
  * from node's page's beginning to get a data block address.
  * ex) data_blkaddr = (block_t)(nodepage_start_address + ofs_in_node)
  */
+/* 每个segment对应512个summary entry，对应512个block(data or node) */
 #define ENTRIES_IN_SUM		512
+/* 每个summary entry的大小, 一个summary entry对应一个4k大小的block */
 #define	SUMMARY_SIZE		(sizeof(struct f2fs_summary))
 #define	SUM_FOOTER_SIZE		(sizeof(struct summary_footer))
+/* 一个segment对应的所有summary entries的大小，一个summary entry对应一个4k大小的block */
 #define SUM_ENTRY_SIZE		(SUMMARY_SIZE * ENTRIES_IN_SUM)
 
 /* a summary entry for a 4KB-sized block in a segment */
@@ -283,6 +362,7 @@ struct f2fs_summary {
 		__u8 reserved[3];
 		struct {
 			__u8 version;		/* node version number */
+			/* 所描述的data block地址位于node block的索引 */
 			__le16 ofs_in_node;	/* block index in parent node */
 		} __packed;
 	};
@@ -296,15 +376,19 @@ struct summary_footer {
 	unsigned char entry_type;	/* SUM_TYPE_XXX */
 	__u32 check_sum;		/* summary checksum */
 } __packed;
-
+/* 一个summary entry block留给nat/sit journal的空间(包含n_nats/n_sits) */
 #define SUM_JOURNAL_SIZE	(PAGE_CACHE_SIZE - SUM_FOOTER_SIZE -\
 				SUM_ENTRY_SIZE)
+/* 一个summary entry block能存放nat journal entry的个数 */
 #define NAT_JOURNAL_ENTRIES	((SUM_JOURNAL_SIZE - 2) /\
 				sizeof(struct nat_journal_entry))
+/* 一个summary entry block剩余不够存放一个完整的nat journal entry的剩余空间 */
 #define NAT_JOURNAL_RESERVED	((SUM_JOURNAL_SIZE - 2) %\
 				sizeof(struct nat_journal_entry))
+/* 一个summary entry block能存放sit journal entry的个数 */
 #define SIT_JOURNAL_ENTRIES	((SUM_JOURNAL_SIZE - 2) /\
 				sizeof(struct sit_journal_entry))
+/* 一个summary entry block剩余不够存放一个完整的sit journal entry的剩余空间 */
 #define SIT_JOURNAL_RESERVED	((SUM_JOURNAL_SIZE - 2) %\
 				sizeof(struct sit_journal_entry))
 /*
@@ -344,6 +428,10 @@ struct f2fs_summary_block {
 		__le16 n_sits;
 	};
 	/* spare area is used by NAT or SIT journals */
+	/* 
+	 * 为了避免频繁写入sit/nat区域，将分散的sit/nat修改放到此处，类似于sit/nat的cache
+	 * 如果装满集中flush到sit/nat区域
+	 */
 	union {
 		struct nat_journal nat_j;
 		struct sit_journal sit_j;
